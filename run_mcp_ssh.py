@@ -3,10 +3,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List
 import signal
 import atexit
 import shlex
+import paramiko
+from sshtunnel import SSHTunnelForwarder
 
 from dotenv import load_dotenv
 
@@ -15,139 +18,67 @@ load_dotenv()
 remote_host = os.getenv("REMOTE_HOST")
 remote_user = os.getenv("REMOTE_USER")
 remote_cmd = os.getenv("REMOTE_CMD")
-remote_port = os.getenv("REMOTE_PORT")
-local_port = os.getenv("LOCAL_PORT")
-# runtime handles
-_remote_pid: str | None = None
-_tunnel_proc: subprocess.Popen | None = None
+ssh_port = os.getenv("SSH_PORT")
+mcp_server_remote_port = os.getenv("MCP_SERVER_REMOTE_PORT")
+mcp_server_local_port = os.getenv("MCP_SERVER_LOCAL_PORT")
+
+remote_key_path = os.getenv("SSH_KEY_PATH")
+   
+def init_ssh_client():
+    if not remote_host or not remote_user or not ssh_port:
+        raise ValueError("REMOTE_HOST, REMOTE_USER, and SSH_PORT must be set")
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(remote_host, port=int(ssh_port), username=remote_user)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to open SSH connection to {remote_user}@{remote_host}:{ssh_port}"
+        ) from e
+        
+    print(f"SSH connection established to {remote_user}@{remote_host}:{ssh_port}")
+    return ssh    
     
-def start_mcp_server_over_ssh():
-    """Start the remote MCP server in background and record its PID."""
-    global _remote_pid
-
-    if not (remote_host and remote_user and remote_cmd):
-        raise RuntimeError("REMOTE_HOST, REMOTE_USER and REMOTE_CMD must be set to start remote server")
-
-    # Use nohup + & and echo $! to print the PID of the backgrounded process.
-    # Quote the remote command so it's safe to pass through ssh.
-    quoted_cmd = shlex.quote(remote_cmd)
-    remote_launch = f"nohup {quoted_cmd} > /tmp/mcp_server.log 2>&1 & echo $!"
-
-    ssh_cmd = [
-        "ssh",
-        "-p",
-        f"{remote_port}",
-        f"{remote_user}@{remote_host}",
-        remote_launch,
-    ]
+def start_mcp_server_over_ssh(ssh: paramiko.SSHClient):
+    if not remote_cmd:
+        raise ValueError("REMOTE_CMD must be set")
 
     try:
-        out = subprocess.check_output(ssh_cmd, text=True, stderr=subprocess.STDOUT)
-        pid = out.strip().splitlines()[-1]
-        _remote_pid = pid
-        print(f"Remote server started with PID {_remote_pid}")
-    except subprocess.CalledProcessError as exc:
-        print("Failed to start remote MCP server:", exc.output, file=sys.stderr)
-        raise
+        ssh.exec_command(remote_cmd, get_pty=True)
+    except Exception as e:
+        raise RuntimeError(f"Failed to start MCP server over SSH using command: {remote_cmd}") from e
+
+    print(f"Started MCP server on remote host using command: {remote_cmd}")
 
 def tunnel_port_over_ssh():
     """Start an SSH tunnel as a subprocess.Popen so we can terminate it later.
-
     Returns the Popen object.
     """
-    global _tunnel_proc
+    if not ssh_port or not mcp_server_remote_port or not mcp_server_local_port:
+        raise ValueError("SSH_PORT, MCP_SERVER_REMOTE_PORT, and MCP_SERVER_LOCAL_PORT must be set to create a tunnel")
 
-    if not (remote_host and remote_user and remote_port and local_port):
-        raise RuntimeError("REMOTE_HOST, REMOTE_USER, REMOTE_PORT and LOCAL_PORT must be set to create tunnel")
+    with SSHTunnelForwarder(
+        (remote_host, int(ssh_port)),
+        ssh_username=remote_user,
+        ssh_pkey=remote_key_path,
+        remote_bind_address=('127.0.0.1', int(mcp_server_remote_port)),  # A szerver belső portja, ahol az MCP fut
+        local_bind_address=('127.0.0.1', int(mcp_server_local_port))   # Amilyen porton az otthoni laptopodon akarod elérni
+    ) as tunnel:
 
-    ssh_cmd = [
-        "ssh",
-        "-N",
-        "-L",
-        f"{local_port}:localhost:{remote_port}",
-        f"{remote_user}@{remote_host}",
-    ]
-
-    # Start the ssh tunnel and keep the process handle so we can terminate it on exit.
-    _tunnel_proc = subprocess.Popen(ssh_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"Tunnel started, local:{local_port} -> remote:{remote_port} (ssh pid={_tunnel_proc.pid})")
-    return _tunnel_proc
-
-
-def stop_mcp_server_over_ssh():
-    """Stop the remote MCP server using the PID we recorded (best-effort)."""
-    global _remote_pid
-    if not _remote_pid:
-        return
-
-    ssh_cmd = [
-        "ssh",
-        "-p",
-        f"{remote_port}",
-        f"{remote_user}@{remote_host}",
-        f"kill -TERM {_remote_pid} || kill -9 {_remote_pid} || true; rm -f /tmp/mcp_server.pid",
-    ]
-    try:
-        subprocess.run(ssh_cmd, check=False)
-        print(f"Requested stop for remote PID {_remote_pid}")
-    except Exception as exc:
-        print("Error while stopping remote server:", exc, file=sys.stderr)
-    finally:
-        _remote_pid = None
-
-
-def stop_tunnel():
-    """Terminate the local ssh tunnel process if we started one."""
-    global _tunnel_proc
-    if _tunnel_proc:
+        print(f"Connection successful! Tunnel is live at http://localhost:{tunnel.local_bind_port}.")
+        print("You can now start the AI agent and point it at the local port.")  
+        
         try:
-            _tunnel_proc.terminate()
-            _tunnel_proc.wait(timeout=5)
-            print(f"Tunnel process {_tunnel_proc.pid} terminated")
-        except Exception:
-            try:
-                _tunnel_proc.kill()
-            except Exception:
-                pass
-        finally:
-            _tunnel_proc = None
-    def _cleanup_and_exit(code: int = 0):
-        stop_tunnel()
-        stop_mcp_server_over_ssh()
-        sys.exit(code)
-
-
-    def _signal_handler(signum, frame):
-        print(f"Received signal {signum}; cleaning up...", file=sys.stderr)
-        _cleanup_and_exit(0)
-
-
-    # Register handlers
-    try:
-        signal.signal(signal.SIGINT, _signal_handler)
-        signal.signal(signal.SIGTERM, _signal_handler)
-    except Exception:
-        # On Windows some signals/handlers may not be available; KeyboardInterrupt will still work.
-        pass
-
-    atexit.register(_cleanup_and_exit)
-
-
-# Note: OpenAI/MCP agent code removed for simpler testing. The script
-# now only starts the remote server and tunnel, then waits until terminated.
-
-
-async def main() -> None:
-    print("Running. Press Ctrl+C to stop and clean up the remote server and tunnel.")
-    # Wait forever until signal/KeyboardInterrupt triggers cleanup
-    await asyncio.Event().wait()
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nAlagút lezárása...")  
 
 
 if __name__ == "__main__":
-    start_mcp_server_over_ssh()
+    ssh = init_ssh_client()
+    start_mcp_server_over_ssh(ssh)
     tunnel_port_over_ssh()
-    print(
-        f"Started MCP server on {remote_host}:{remote_port} and tunneled to local port "
-        f"{local_port}"
-    )
-    asyncio.run(main())
+
+    #asyncio.run(main())
