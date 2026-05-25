@@ -1,55 +1,21 @@
 from uuid import uuid4
 
 from a2a.types import (
-    AgentCapabilities,
     AgentCard,
-    AgentInterface,
     AgentSkill,
-    Message,
+    JSONRPCErrorResponse,
     Message,
     MessageSendParams,
     Part,
-    Part,
     Role,
-    Role,
-    SendMessageRequest,
     SendMessageRequest,
     TextPart,
-    TaskArtifactUpdateEvent,
-    TaskState,
-    TaskStatus,
-    TaskStatusUpdateEvent,
 )
-from a2a.server.apps import A2AStarletteApplication
-from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
-
-from a2a.server.agent_execution import AgentExecutor, RequestContext
-from a2a.server.events import EventQueue
-from a2a.utils.artifact import new_text_artifact
-from a2a.utils.message import new_agent_text_message
-from a2a.utils.task import new_task
-
 from a2a.client import A2AClient, A2ACardResolver
-from typing import List, Dict
+from typing import Any, Dict, List
 import httpx
 
-from dotenv import load_dotenv
-import uvicorn
 from pydantic_ai import Agent
-import os
-
-
-
-load_dotenv()
-
-MODEL = os.getenv("OPENAI_MODEL")
-
-# Agent Card configuration from environment (with sensible defaults)
-ADVISOR_HOST = os.getenv("ADVISOR_HOST")
-ADVISOR_PORT = int(os.getenv("ADVISOR_PORT", "10020"))
-ADVISOR_AVATAR_URL = f"http://{ADVISOR_HOST}:{ADVISOR_PORT}/"
-ADVISOR_INTERFACE_URL = f"http://{ADVISOR_HOST}:{ADVISOR_PORT}"
 
 class AgentRegistry:
     agent_client_map: Dict[str, A2AClient] = {}
@@ -82,141 +48,91 @@ class AgentRegistry:
     async def create_clients(self):
         for url in self.agent_urls:
             await self._create_client(url)
-
-give_advice=AgentSkill(
-    id="give_advice",
-    name ="Profile & Recommend",
-    description=(
-        "Analyze CUDA sources and profiling outputs, identify performance hotspots and root causes, "
-        "and provide prioritized, actionable code changes the coding agent can implement."
-    ),
-    tags=["cuda", "profiling", "performance", "advice"],
-    examples=[
-        "Profile kernel `compute()` and recommend memory and launch-configuration changes to reduce runtime.",
-        "Identify potential bank conflicts and divergent branches in `kernel.cu` and propose code-level fixes.",
-        "Suggest concrete changes (e.g., loop unrolling, shared memory use, threadblock sizing) to improve occupancy and throughput."],
-)
-
-"""advisor_agent_card = AgentCard(
-    name="CUDA Profiling Advisor",
-    url=ADVISOR_AVATAR_URL,
-    version="1.0.0",
-    description=(
-        "An agent that profiles CUDA code, extracts performance-critical information, and provides concise, prioritized recommendations "
-        "for a coding agent to apply changes to the source code."
-    ),
-    skills=[give_advice],
-    default_input_modes=['text'],
-    default_output_modes=['text'],
-    capabilities=AgentCapabilities(
-        streaming=True
-    ),
-    supported_interfaces=[
-        AgentInterface(
-            transport='JSONRPC',
-            url=ADVISOR_INTERFACE_URL,
-        )
-    ],
-)"""
-
-
-class AdvisorAgent():
-    """CUDA Advisor Agent Executor Implementation."""
-
-    def __init__(self, advisor_agent: Agent, registry: AgentRegistry) -> None:
+            
+class SeniorProgrammerAgent:
+    def __init__(self, registry: AgentRegistry, model: str, shared_inbox: List[str] | None = None):
         self.registry = registry
-        self.agent = advisor_agent
-        self.agent.tool_plain(self.send_message)
-        
-        
+        self.shared_inbox = shared_inbox if shared_inbox is not None else []
+        self.agent = self._create_agent(model)
 
-    async def execute(
-        self,
-        context: RequestContext,
-        event_queue: EventQueue,
-    ) -> None:
-        """Execute the agent process and enqueue the final response."""
-        task = context.current_task or new_task(context.message)
-        await event_queue.enqueue_event(task)
+    def _format_skill(self, skill: AgentSkill) -> str:
+        examples = ", ".join(skill.examples or [])
+        if examples:
+            return f"{skill.name} (examples: {examples})"
+        return skill.name
 
-        await event_queue.enqueue_event(
-            TaskStatusUpdateEvent(
-                task_id=context.task_id,
-                context_id=context.context_id,
-                status=TaskStatus(
-                    state=TaskState.working,
-                    message=new_agent_text_message('Profiling and analyzing CUDA sources...'),
-                ),
-                final=False
-            )
+    def _agent_description(self, agent_name: str):
+        agent_card = self.registry.agent_card_map[agent_name]
+        skill_lines = ", ".join(self._format_skill(skill) for skill in agent_card.skills)
+        return (
+            f"Agent name: {agent_card.name}\n"
+            f"Agent description: {agent_card.description}\n"
+            f"Agent skills: {skill_lines}\n"
         )
 
-        message = context.message
-        extracted_text = " ".join([part.root.text for part in message.parts if type(part.root) is TextPart])
-        response = await self.agent.run(extracted_text)
-
-        await event_queue.enqueue_event(
-            TaskArtifactUpdateEvent(
-                task_id=context.task_id,
-                context_id=context.context_id,
-                artifact=new_text_artifact(name='result', text=response.output),
-            )
+    def system_instruction(self):
+        agent_descriptions = "\n".join(
+            self._agent_description(agent) for agent in self.registry.agent_card_map.keys()
         )
-        await event_queue.enqueue_event(
-            TaskStatusUpdateEvent(
-                task_id=context.task_id,
-                context_id=context.context_id,
-                status=TaskStatus(state=TaskState.completed),
-                final=True
-            )
+        return (
+            "You are the CUDA facilitator. You do not write CUDA code yourself unless explicitly asked for a final summary; you coordinate the specialist agents. "
+            "Your job is to turn the user's request into precise, executable instructions for the coding agent, then use the profiler's measurements to decide the next step. "
+            "Always prefer delegation over explanation: if the coding agent should act, send it a message instead of narrating the change in your own answer. "
+            "If the profiler has findings, use them to refine the next coding instructions. If a specialist needs clarification or a decision, message them directly. "
+            "Continue iterating until several consecutive rounds show a plateau or no meaningful improvement, then report the best result and why further changes were not justified. "
+            "Never stop after a single pass if there is still a plausible improvement path. "
+            "\n===Agents===\n"
+            f"{agent_descriptions}"
         )
 
-    async def cancel(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> None:
-        """Raise exception as cancel is not supported."""
-        raise Exception('cancel not supported')
-    
     async def send_message(self, agent_name: str, message: str):
       """Send a message to another agent."""
-      agent_client = self.registry.agent_client_map[agent_name]
+      agent_client = self.registry.agent_client_map.get(agent_name)
       if not agent_client:
         return "The given agent does not exist. Choose an existing one."
 
-
-      parts = [Part(text=message)]
-      message = Message(
+      parts = [Part(root=TextPart(text=message))]
+      outbound_message = Message(
           role=Role.user,
           parts=parts,
           message_id=uuid4().hex,
       )
 
       try:
-        response = await agent_client.send_message(SendMessageRequest(id=uuid4().hex, params=MessageSendParams(message=message)))
-        return response.root.result.artifacts
+        response = await agent_client.send_message(
+            SendMessageRequest(
+                id=uuid4().hex,
+                params=MessageSendParams(message=outbound_message),
+            )
+        )
+        root = response.root
+        if isinstance(root, JSONRPCErrorResponse):
+            return root.error.message or str(root.error)
+        result: Any = root.result
+        if hasattr(result, "parts"):
+            if hasattr(result, "parts"):
+                return " ".join(
+                    part.root.text for part in result.parts if hasattr(part.root, "text")
+                )
+            return str(result)
+        return str(root)
 
       except Exception:
         return "The given agent is not available currently."
 
       return ""
 
+    def _create_agent(self, model: str):
+        return Agent(
+            model,
+            system_prompt=self.system_instruction(),
+            tools=[self.send_message]
+        )
+
     async def run(self, message: str):
+        if self.shared_inbox:
+            inbox_text = "\n\nBack-channel messages from specialist agents:\n" + "\n".join(self.shared_inbox)
+            self.shared_inbox.clear()
+            message = f"{message}{inbox_text}"
         response = await self.agent.run(message)
         return response.output
-    
-    
-    
-
-
-"""request_handler = DefaultRequestHandler(
-    agent_executor=AdvisorExecutor(advisor_agent_card, registry=None),
-    task_store=InMemoryTaskStore(),
-)
-
-server = A2AStarletteApplication(
-    agent_card=advisor_agent_card,
-    http_handler=request_handler,
-)
-
-def run_advisor_agent(host: str, port: int):
-    uvicorn.run(server.build(), host=host, port=port, log_level="info")"""

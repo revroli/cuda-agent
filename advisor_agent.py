@@ -1,19 +1,8 @@
-from uuid import uuid4
-
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentInterface,
     AgentSkill,
-    Message,
-    Message,
-    MessageSendParams,
-    Part,
-    Part,
-    Role,
-    Role,
-    SendMessageRequest,
-    SendMessageRequest,
     TextPart,
     TaskArtifactUpdateEvent,
     TaskState,
@@ -30,15 +19,10 @@ from a2a.utils.artifact import new_text_artifact
 from a2a.utils.message import new_agent_text_message
 from a2a.utils.task import new_task
 
-from a2a.client import A2AClient, A2ACardResolver
-from typing import List, Dict
-import httpx
-
 from dotenv import load_dotenv
 import uvicorn
 from pydantic_ai import Agent
 import os
-
 
 
 load_dotenv()
@@ -51,61 +35,45 @@ ADVISOR_PORT = int(os.getenv("ADVISOR_PORT", "10020"))
 ADVISOR_AVATAR_URL = f"http://{ADVISOR_HOST}:{ADVISOR_PORT}/"
 ADVISOR_INTERFACE_URL = f"http://{ADVISOR_HOST}:{ADVISOR_PORT}"
 
-class AgentRegistry:
-    agent_client_map: Dict[str, A2AClient] = {}
-    agent_card_map: Dict[str, AgentCard] = {}
-
-    def __init__(self, agent_urls: List[str]):
-        self.agent_urls = agent_urls
-
-    async def _create_client(self, url: str):
-        async with httpx.AsyncClient() as httpx_client:
-            resolver = A2ACardResolver(
-                httpx_client=httpx_client,
-                base_url=url,
-            )
-
-            public_card = (
-                await resolver.get_agent_card()
-            )
 
 
-        self.agent_card_map[public_card.name] = public_card
-
-        async_httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))
-        client = A2AClient(
-            httpx_client=async_httpx_client,
-            agent_card=public_card,
-        )
-        self.agent_client_map[public_card.name] = client
-
-    async def create_clients(self):
-        for url in self.agent_urls:
-            await self._create_client(url)
 
 give_advice=AgentSkill(
     id="give_advice",
-    name ="Profile & Recommend",
+    name ="Profile & Report",
     description=(
-        "Analyze CUDA sources and profiling outputs, identify performance hotspots and root causes, "
-        "and provide prioritized, actionable code changes the coding agent can implement."
+        "Profile CUDA code and report the most useful performance findings to the facilitator. "
+        "Focus on measurements, hotspots, bottlenecks, and evidence from profiling output rather than on proposing code improvements."
     ),
-    tags=["cuda", "profiling", "performance", "advice"],
+    tags=["cuda", "profiling", "performance", "report"],
     examples=[
-        "Profile kernel `compute()` and recommend memory and launch-configuration changes to reduce runtime.",
-        "Identify potential bank conflicts and divergent branches in `kernel.cu` and propose code-level fixes.",
-        "Suggest concrete changes (e.g., loop unrolling, shared memory use, threadblock sizing) to improve occupancy and throughput."],
+        "Profile kernel `compute()` and report runtime breakdowns, memory throughput, and occupancy trends.",
+        "Identify potential bank conflicts, divergence, and cache inefficiencies in `kernel.cu` and summarize the evidence.",
+        "Provide the facilitator with the profiling commands used, the key metrics observed, and any notable regressions or plateaus."],
 )
 
-"""advisor_agent_card = AgentCard(
-    name="CUDA Profiling Advisor",
+send_message = AgentSkill(
+    id="send_message",
+    name="Send Profiling Update",
+    description=(
+        "Send a short profiling result, blocker, or clarification request back to the facilitator."
+    ),
+    tags=["communication", "facilitator", "status"],
+    examples=[
+        "Send the facilitator the latest profiling summary and a recommendation to stop iterating.",
+        "Ask the facilitator for a narrower profiling target before the next measurement run.",
+        "Report that the observed kernel runtime plateaued after the last code change.",
+    ],
+)
+
+advisor_agent_card = AgentCard(
+    name="CUDA Profiler Agent",
     url=ADVISOR_AVATAR_URL,
     version="1.0.0",
     description=(
-        "An agent that profiles CUDA code, extracts performance-critical information, and provides concise, prioritized recommendations "
-        "for a coding agent to apply changes to the source code."
+        "An agent that profiles CUDA code, extracts performance-critical information, and reports concise, evidence-based findings to the facilitator."
     ),
-    skills=[give_advice],
+    skills=[give_advice, send_message],
     default_input_modes=['text'],
     default_output_modes=['text'],
     capabilities=AgentCapabilities(
@@ -117,18 +85,14 @@ give_advice=AgentSkill(
             url=ADVISOR_INTERFACE_URL,
         )
     ],
-)"""
+)
 
 
-class AdvisorAgent():
+class AdvisorExecutor(AgentExecutor):
     """CUDA Advisor Agent Executor Implementation."""
 
-    def __init__(self, advisor_agent: Agent, registry: AgentRegistry) -> None:
-        self.registry = registry
-        self.agent = advisor_agent
-        self.agent.tool_plain(self.send_message)
-        
-        
+    def __init__(self, profiler_agent: Agent) -> None:
+        self.agent = profiler_agent
 
     async def execute(
         self,
@@ -176,47 +140,20 @@ class AdvisorAgent():
     ) -> None:
         """Raise exception as cancel is not supported."""
         raise Exception('cancel not supported')
-    
-    async def send_message(self, agent_name: str, message: str):
-      """Send a message to another agent."""
-      agent_client = self.registry.agent_client_map[agent_name]
-      if not agent_client:
-        return "The given agent does not exist. Choose an existing one."
 
+def init_advisor_agent(agent: Agent) -> A2AStarletteApplication:
 
-      parts = [Part(text=message)]
-      message = Message(
-          role=Role.user,
-          parts=parts,
-          message_id=uuid4().hex,
-      )
+    request_handler = DefaultRequestHandler(
+        agent_executor=AdvisorExecutor(profiler_agent = agent),
+        task_store=InMemoryTaskStore(),
+    )
 
-      try:
-        response = await agent_client.send_message(SendMessageRequest(id=uuid4().hex, params=MessageSendParams(message=message)))
-        return response.root.result.artifacts
+    server = A2AStarletteApplication(
+        agent_card=advisor_agent_card,
+        http_handler=request_handler,
+    )
 
-      except Exception:
-        return "The given agent is not available currently."
+    return server
 
-      return ""
-
-    async def run(self, message: str):
-        response = await self.agent.run(message)
-        return response.output
-    
-    
-    
-
-
-"""request_handler = DefaultRequestHandler(
-    agent_executor=AdvisorExecutor(advisor_agent_card, registry=None),
-    task_store=InMemoryTaskStore(),
-)
-
-server = A2AStarletteApplication(
-    agent_card=advisor_agent_card,
-    http_handler=request_handler,
-)
-
-def run_advisor_agent(host: str, port: int):
-    uvicorn.run(server.build(), host=host, port=port, log_level="info")"""
+def run_advisor_agent(host: str, port: int, server: A2AStarletteApplication):
+    uvicorn.run(server.build(), host=host, port=port, log_level="info")

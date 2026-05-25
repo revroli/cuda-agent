@@ -49,6 +49,20 @@ write_code = AgentSkill(
         "Introduce `__launch_bounds__` and adjust unrolling pragmas to improve occupancy."],
 )
 
+send_message = AgentSkill(
+    id="send_message",
+    name="Send Status Update",
+    description=(
+        "Send a short progress update, blocker, or clarification request back to the facilitator."
+    ),
+    tags=["communication", "facilitator", "status"],
+    examples=[
+        "Send the facilitator a concise note that the kernel patch is ready for review.",
+        "Ask the facilitator for a decision when there are two viable optimization paths.",
+        "Report that the requested code change was applied and needs profiling feedback.",
+    ],
+)
+
 coder_agent_card = AgentCard(
     name="CUDA Coding Agent",
     url=CODER_AVATAR_URL,
@@ -56,7 +70,7 @@ coder_agent_card = AgentCard(
     description=(
         "An agent that receives profiling-driven recommendations and implements optimized CUDA code changes as patches, with tests and benchmarks."
     ),
-    skills=[write_code],
+    skills=[write_code, send_message],
     default_input_modes=['text'],
     default_output_modes=['text'],
     capabilities=AgentCapabilities(
