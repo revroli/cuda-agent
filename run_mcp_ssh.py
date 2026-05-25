@@ -13,10 +13,12 @@ import httpx
 
 from dotenv import load_dotenv
 
+from advisor_agent import AdvisorAgent, AgentRegistry
 from coder_agent import init_coder_agent, run_coder_agent
 import nest_asyncio
 from fasta2a.client import A2AClient
 from fasta2a.schema import Message, TextPart
+from IPython.display import display, Markdown
 
 load_dotenv()
 
@@ -72,25 +74,6 @@ async def tunnel_port_over_ssh():
         local_bind_address=('127.0.0.1', int(mcp_server_local_port))   # Amilyen porton az otthoni laptopodon akarod elérni
     ) as tunnel:
         
-        """print(f"SSH tunnel established: localhost:{mcp_server_local_port} -> {remote_host}:{mcp_server_remote_port}")
-        # 1. Létrehozunk egy aszinkron HTTPX klienst, ami bírja a folyamatos adatfolyamot (Stream)
-        async with httpx.AsyncClient() as http_client:
-        
-            print(f"SSH tunnel established: localhost:{mcp_server_local_port} -> {remote_host}:{mcp_server_remote_port}")
-        # Bekopogunk az /mcp végpontra az elvárt session ID-ért
-        # A timeout=None azért kell, mert az MCP egy nyitott, hosszú kapcsolat
-            async with http_client.stream("GET", f"http://127.0.0.1:{mcp_server_local_port}/mcp", timeout=None) as response:
-                
-                if response.status_code != 200:
-                    print(f"[HIBA] A szerver {response.status_code} kóddal elutasította a kapcsolatot!")
-                    return
-                    
-                print("[SIKER] A szerver fogadta a kapcsolatot, inicializálás...")
-
-                # Készítünk két aszinkron sort (Queue), amik a Linux írás/olvasás stream-eket szimulálják
-                read_stream = asyncio.Queue()
-                write_stream = asyncio.Queue()
-                """
         print(f"SSH tunnel established: localhost:{mcp_server_local_port} -> {remote_host}:{mcp_server_remote_port}")
         # Csatlakozunk a távoli MCP-hez az alagúton át
         await asyncio.sleep(1)  # Várunk egy kicsit, hogy biztosan létrejöjjön az alagút
@@ -118,10 +101,13 @@ async def tunnel_port_over_ssh():
                     ),
                 )
                 
-                advisor_agent = Agent(
+                advisor_agent_prototype = Agent(
                     model,
                     system_prompt=(
-                        "You are an expert CUDA profiling advisor collaborating with a coding agent. "
+                        "You are the master CUDA profiling advisor collaborating with a coding agent. "
+                        "You must never create, write, or patch programming code yourself. "
+                        "Your only job is to analyze CUDA source files and profiling output, then instruct the other agent exactly what it should change. "
+                        "All implementation, patching, and code generation must be delegated to the coding agent. "
                         "Your primary job is to analyze CUDA source files and profiling output, extract the most important performance information (hotspots, kernel runtimes, memory bandwidth, occupancy, divergent branches, shared memory usage, bank conflicts), "
                         "and produce concise, prioritized, actionable recommendations the coding agent can implement. "
                         "You may run shell commands on the remote server using the tool `execute_command(command: str) -> str` to run profilers (nvprof, nsight, nvbench, nvtx, nsys, perf), collect outputs, and reproduce measurements. "
@@ -148,6 +134,8 @@ async def tunnel_port_over_ssh():
 
                     # Regisztráljuk az eszközt az ágensbe
                     coder_agent.tool_plain(dynamic_tool_wrapper)
+                    advisor_agent_prototype.tool_plain(dynamic_tool_wrapper)
+                    
 
                 print(f"[MCP] {len(mcp_tools_response.tools)} eszköz sikeresen csatolva az ágenshez.")
                 nest_asyncio.apply()
@@ -155,51 +143,41 @@ async def tunnel_port_over_ssh():
                 logfire.configure(send_to_logfire='if-token-present')
                 logfire.instrument_pydantic_ai()
 
-                server = init_coder_agent(coder_agent)
+                coder_server = init_coder_agent(coder_agent)
                 
-                daemon_thread = threading.Thread(target=run_coder_agent, args = ("127.0.0.1", 8000, server), daemon=True)
-                daemon_thread.start()
+                host_ip = "127.0.0.1"
+                host_port = 8000
 
-                """# 3. Futtatás - felhasználói prompttal (párbeszéd)
-                chat_history = []
-                max_turns = 10
-                while True:
-                    user_prompt = input("\n[User]: ").strip()
-                    if not user_prompt:
-                        continue
-                    if user_prompt.lower() in {"exit", "quit"}:
-                        break
+                coder_daemon_thread = threading.Thread(target=run_coder_agent, args = (host_ip, host_port, coder_server), daemon=True)
+                coder_daemon_thread.start()
 
-                    print("[Agent]: Gondolkodom es futtatom a szukseges lepeseket...")
+                agent_urls = [f"http://{host_ip}:{host_port}"]
+                registry = AgentRegistry(agent_urls)
+                await registry.create_clients()
+                advisor_agent = AdvisorAgent(advisor_agent_prototype, registry=registry )
 
-                    chat_history.append(("User", user_prompt))
-                    chat_history = chat_history[-max_turns * 2 :]
-                    history_text = "\n".join(f"{role}: {text}" for role, text in chat_history)
-                    combined_prompt = f"Conversation so far:\n{history_text}\nAssistant:"
-
-                    # A Pydantic AI teljesen atveszi az iranyitast:
-                    # Ha kell, meghivja a tavoli fuggvenyt, megvarja az eredmenyt, es magatol ujraprobalja
-                    result = await agent.run(combined_prompt)
-                    ai_text = result.output
-                    chat_history.append(("Assistant", ai_text))
-
-                    print(f"\n[AI Vegso Valasz]: {ai_text}")"""
                     
-                coder_client = A2AClient(
-                    "http://127.0.0.1:8000",
+                """coder_client = A2AClient(
+                    f"http://{host_ip}:{host_port}",
                     httpx.AsyncClient(timeout=httpx.Timeout(100.0, connect=20.0)),
-                )
-
+                )"""
                 
-                response = await client.send_message(message=Message(
+                result = await advisor_agent.run("Create a code that adds two vectors together in CUDA.")
+                
+
+
+
+                """response = await client.send_message(message=Message(
                     message_id="1",
                     role="user",
                     kind="message",
                     parts=[TextPart(kind="text", text=f"Write a CUDA kernel that adds two vectors together and returns the result and create a .cu file from it.")]
-                ))
+                ))"""
                 
                 #final_response = response["result"]
-                print(f"\n[Final Result]: {response}")
+                #print(f"\n[Final Result]: {response}")
+                
+                display(Markdown(result))
                 
 
 
