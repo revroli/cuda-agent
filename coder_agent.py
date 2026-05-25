@@ -19,22 +19,8 @@ from a2a.utils.artifact import new_text_artifact
 from a2a.utils.message import new_agent_text_message
 from a2a.utils.task import new_task
 
-from dotenv import load_dotenv
 import uvicorn
 from pydantic_ai import Agent
-import os
-
-
-load_dotenv()
-
-MODEL = os.getenv("OPENAI_MODEL")
-
-# Agent Card configuration from environment (with sensible defaults)
-CODER_HOST = os.getenv("CODER_HOST")
-CODER_PORT = int(os.getenv("CODER_PORT", "10021"))
-CODER_AVATAR_URL = f"http://{CODER_HOST}:{CODER_PORT}/"
-CODER_INTERFACE_URL = f"http://{CODER_HOST}:{CODER_PORT}"
-
 
 write_code = AgentSkill(
     id="write_code",
@@ -48,43 +34,6 @@ write_code = AgentSkill(
         "Replace coalesced loads with vectorized loads and add `__restrict__` annotations to pointers.",
         "Introduce `__launch_bounds__` and adjust unrolling pragmas to improve occupancy."],
 )
-
-send_message = AgentSkill(
-    id="send_message",
-    name="Send Status Update",
-    description=(
-        "Send a short progress update, blocker, or clarification request back to the facilitator."
-    ),
-    tags=["communication", "facilitator", "status"],
-    examples=[
-        "Send the facilitator a concise note that the kernel patch is ready for review.",
-        "Ask the facilitator for a decision when there are two viable optimization paths.",
-        "Report that the requested code change was applied and needs profiling feedback.",
-    ],
-)
-
-coder_agent_card = AgentCard(
-    name="CUDA Coding Agent",
-    url=CODER_AVATAR_URL,
-    version="1.0.0",
-    description=(
-        "An agent that receives profiling-driven recommendations and implements optimized CUDA code changes as patches, with tests and benchmarks."
-    ),
-    skills=[write_code, send_message],
-    default_input_modes=['text'],
-    default_output_modes=['text'],
-    capabilities=AgentCapabilities(
-        streaming=True
-    ),
-    supported_interfaces=[
-        AgentInterface(
-            transport='JSONRPC',
-            url=CODER_INTERFACE_URL,
-        )
-    ],
-)
-
-
 class CoderExecutor(AgentExecutor):
     """CUDA Coding Agent Executor Implementation."""
 
@@ -138,7 +87,30 @@ class CoderExecutor(AgentExecutor):
         """Raise exception as cancel is not supported."""
         raise Exception('cancel not supported')
 
-def init_coder_agent(agent: Agent) -> A2AStarletteApplication:
+def init_coder_agent(agent: Agent, host: str, port: int) -> A2AStarletteApplication:
+    coder_avatar_url = f"http://{host}:{port}/"
+    coder_interface_url = f"http://{host}:{port}"
+
+    coder_agent_card = AgentCard(
+        name="CUDA Coding Agent",
+        url=coder_avatar_url,
+        version="1.0.0",
+        description=(
+            "An agent that receives profiling-driven recommendations and implements optimized CUDA code changes as patches, with tests and benchmarks."
+        ),
+        skills=[write_code],
+        default_input_modes=['text'],
+        default_output_modes=['text'],
+        capabilities=AgentCapabilities(
+            streaming=True
+        ),
+        supported_interfaces=[
+            AgentInterface(
+                transport='JSONRPC',
+                url=coder_interface_url,
+            )
+        ],
+    )
     request_handler = DefaultRequestHandler(
         agent_executor=CoderExecutor(coder_agent=agent),
         task_store=InMemoryTaskStore(),

@@ -35,8 +35,7 @@ class AgentRegistry:
             public_card = (
                 await resolver.get_agent_card()
             )
-
-
+            
         self.agent_card_map[public_card.name] = public_card
 
         async_httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))

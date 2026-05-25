@@ -19,24 +19,8 @@ from a2a.utils.artifact import new_text_artifact
 from a2a.utils.message import new_agent_text_message
 from a2a.utils.task import new_task
 
-from dotenv import load_dotenv
 import uvicorn
 from pydantic_ai import Agent
-import os
-
-
-load_dotenv()
-
-MODEL = os.getenv("OPENAI_MODEL")
-
-# Agent Card configuration from environment (with sensible defaults)
-ADVISOR_HOST = os.getenv("ADVISOR_HOST")
-ADVISOR_PORT = int(os.getenv("ADVISOR_PORT", "10020"))
-ADVISOR_AVATAR_URL = f"http://{ADVISOR_HOST}:{ADVISOR_PORT}/"
-ADVISOR_INTERFACE_URL = f"http://{ADVISOR_HOST}:{ADVISOR_PORT}"
-
-
-
 
 give_advice=AgentSkill(
     id="give_advice",
@@ -51,43 +35,6 @@ give_advice=AgentSkill(
         "Identify potential bank conflicts, divergence, and cache inefficiencies in `kernel.cu` and summarize the evidence.",
         "Provide the facilitator with the profiling commands used, the key metrics observed, and any notable regressions or plateaus."],
 )
-
-send_message = AgentSkill(
-    id="send_message",
-    name="Send Profiling Update",
-    description=(
-        "Send a short profiling result, blocker, or clarification request back to the facilitator."
-    ),
-    tags=["communication", "facilitator", "status"],
-    examples=[
-        "Send the facilitator the latest profiling summary and a recommendation to stop iterating.",
-        "Ask the facilitator for a narrower profiling target before the next measurement run.",
-        "Report that the observed kernel runtime plateaued after the last code change.",
-    ],
-)
-
-advisor_agent_card = AgentCard(
-    name="CUDA Profiler Agent",
-    url=ADVISOR_AVATAR_URL,
-    version="1.0.0",
-    description=(
-        "An agent that profiles CUDA code, extracts performance-critical information, and reports concise, evidence-based findings to the facilitator."
-    ),
-    skills=[give_advice, send_message],
-    default_input_modes=['text'],
-    default_output_modes=['text'],
-    capabilities=AgentCapabilities(
-        streaming=True
-    ),
-    supported_interfaces=[
-        AgentInterface(
-            transport='JSONRPC',
-            url=ADVISOR_INTERFACE_URL,
-        )
-    ],
-)
-
-
 class AdvisorExecutor(AgentExecutor):
     """CUDA Advisor Agent Executor Implementation."""
 
@@ -141,7 +88,30 @@ class AdvisorExecutor(AgentExecutor):
         """Raise exception as cancel is not supported."""
         raise Exception('cancel not supported')
 
-def init_advisor_agent(agent: Agent) -> A2AStarletteApplication:
+def init_advisor_agent(agent: Agent, host: str, port: int) -> A2AStarletteApplication:
+    advisor_avatar_url = f"http://{host}:{port}/"
+    advisor_interface_url = f"http://{host}:{port}"
+
+    advisor_agent_card = AgentCard(
+        name="CUDA Profiler Agent",
+        url=advisor_avatar_url,
+        version="1.0.0",
+        description=(
+            "An agent that profiles CUDA code, extracts performance-critical information, and reports concise, evidence-based findings to the facilitator."
+        ),
+        skills=[give_advice],
+        default_input_modes=['text'],
+        default_output_modes=['text'],
+        capabilities=AgentCapabilities(
+            streaming=True
+        ),
+        supported_interfaces=[
+            AgentInterface(
+                transport='JSONRPC',
+                url=advisor_interface_url,
+            )
+        ],
+    )
 
     request_handler = DefaultRequestHandler(
         agent_executor=AdvisorExecutor(profiler_agent = agent),

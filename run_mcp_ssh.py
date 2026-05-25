@@ -8,14 +8,12 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 from pydantic_ai import Agent
 
-
 from dotenv import load_dotenv
 
 from coder_agent import init_coder_agent, run_coder_agent
 from advisor_agent import init_advisor_agent, run_advisor_agent
 from facilitator_agent import AgentRegistry, SeniorProgrammerAgent
 import nest_asyncio
-from IPython.display import display, Markdown
 
 load_dotenv()
 
@@ -67,25 +65,19 @@ async def tunnel_port_over_ssh():
         (remote_host, int(ssh_port)),
         ssh_username=remote_user,
         ssh_pkey=remote_key_path,
-        remote_bind_address=('127.0.0.1', int(mcp_server_remote_port)),  # A szerver belső portja, ahol az MCP fut
-        local_bind_address=('127.0.0.1', int(mcp_server_local_port))   # Amilyen porton az otthoni laptopodon akarod elérni
+        remote_bind_address=('127.0.0.1', int(mcp_server_remote_port)),  # Remote internal port where MCP runs
+        local_bind_address=('127.0.0.1', int(mcp_server_local_port))   # Local port you want to reach on your laptop
     ) as tunnel:
-        
         print(f"SSH tunnel established: localhost:{mcp_server_local_port} -> {remote_host}:{mcp_server_remote_port}")
-        # Csatlakozunk a távoli MCP-hez az alagúton át
-        await asyncio.sleep(1)  # Várunk egy kicsit, hogy biztosan létrejöjjön az alagút
-        print(f"Connecting to MCP server through SSH tunnel on localhost:{mcp_server_local_port}...")
-        
         
         async with sse_client(f"http://127.0.0.1:{mcp_server_local_port}/sse") as (read_stream, write_stream):
             print("Connected to MCP server through SSH tunnel. Starting agent...")
             async with ClientSession(read_stream, write_stream) as mcp_session:
                 await mcp_session.initialize()
                 
-                print("[MCP] Eszközök beolvasása a távoli Linuxról...")
+                print("Eszközök beolvasása a távoli Linuxról...")
                 mcp_tools_response = await mcp_session.list_tools()
 
-                # Létrehozzuk a Pydantic AI ágenst
                 coder_agent = Agent(
                     model,
                     system_prompt=(
@@ -112,39 +104,39 @@ async def tunnel_port_over_ssh():
                     ),
                 )
 
-                # 2. AZ MCP ESZKÖZÖK REGISZTRÁLÁSA (A Pydantic AI varázslata)
+                # 2. REGISTER MCP TOOLS (Pydantic AI magic)
                 for tool in mcp_tools_response.tools:
                     
-                    # Készítünk egy dinamikus wrapper függvényt, amit az ágens meg tud hívni
-                    # A lambda vagy belső függvény segít átadni a hívást az MCP session-nek
+                    # Create a dynamic wrapper function that the agent can call
+                    # The lambda/inner function forwards the call to the MCP session
                     async def dynamic_tool_wrapper(tool_name=tool.name, **kwargs):
-                        # Ez fut le, amikor az OpenAI úgy dönt, hogy megnyomja a gombot
-                        print(f"[Pydantic AI -> MCP] Eszköz futtatása: {tool_name} -> {kwargs}")
+                        # This runs when OpenAI decides to invoke the tool
+                        print(f"[Pydantic AI -> MCP] Running tool: {tool_name} -> {kwargs}")
                         result = await mcp_session.call_tool(tool_name, arguments=kwargs)
                         return result.content
 
-                    # Beállítjuk a metaadatokat, hogy a GPT-4o tudja, mire jó a függvény
+                    # Set metadata so GPT-4o understands what the function does
                     dynamic_tool_wrapper.__name__ = tool.name
                     dynamic_tool_wrapper.__doc__ = tool.description
 
-                    # Regisztráljuk az eszközt az ágensbe
+                    # Register the tool on the agent
                     coder_agent.tool_plain(dynamic_tool_wrapper)
                     profiler_agent.tool_plain(dynamic_tool_wrapper)
                     
 
-                print(f"[MCP] {len(mcp_tools_response.tools)} eszköz sikeresen csatolva az ágenshez.")
+                print(f"[MCP] {len(mcp_tools_response.tools)} tools successfully registered with the agent.")
+                
                 nest_asyncio.apply()
                 
                 logfire.configure(send_to_logfire='if-token-present')
                 logfire.instrument_pydantic_ai()
 
-                coder_server = init_coder_agent(coder_agent)
-                advisor_server = init_advisor_agent(profiler_agent)
-                
                 host_ip = "127.0.0.1"
                 host_port_coder = 8000
                 host_port_advisor = 8001
 
+                coder_server = init_coder_agent(coder_agent, host=host_ip, port=host_port_coder)
+                advisor_server = init_advisor_agent(profiler_agent, host=host_ip, port=host_port_advisor)
 
                 coder_daemon_thread = threading.Thread(target=run_coder_agent, args = (host_ip, host_port_coder, coder_server), daemon=True)
                 coder_daemon_thread.start()
@@ -153,37 +145,19 @@ async def tunnel_port_over_ssh():
                 advisor_daemon_thread.start()
 
 
-
                 agent_urls = [f"http://{host_ip}:{host_port_coder}", f"http://{host_ip}:{host_port_advisor}"]
                 registry = AgentRegistry(agent_urls)
                 await registry.create_clients()
-                
                 senior_agent = SeniorProgrammerAgent(registry=registry, model=model)
 
-                    
-                """coder_client = A2AClient(
-                    f"http://{host_ip}:{host_port}",
-                    httpx.AsyncClient(timeout=httpx.Timeout(100.0, connect=20.0)),
-                )"""
-                
-                result = await senior_agent.run("Create a code that adds two vectors together in CUDA.")
-                
+                result = await senior_agent.run(
+                    "Implement a CUDA batched 2D convolution (NCHW) with optional bias and ReLU, supporting stride and padding. "
+                    "Provide a naive baseline kernel and an optimized kernel using shared memory tiling and vectorized loads. "
+                    "Include a small C++/CUDA test harness that validates correctness against a CPU reference for a few random inputs. "
+                    "At the end, include a concise run log that lists separate timings for baseline vs optimized kernels, plus the achieved speedup."
+                )
 
-
-
-                """response = await client.send_message(message=Message(
-                    message_id="1",
-                    role="user",
-                    kind="message",
-                    parts=[TextPart(kind="text", text=f"Write a CUDA kernel that adds two vectors together and returns the result and create a .cu file from it.")]
-                ))"""
-                
-                #final_response = response["result"]
-                #print(f"\n[Final Result]: {response}")
-                
-                display(Markdown(result))
-                
-
+                print(result)
 
 if __name__ == "__main__":
     ssh = init_ssh_client()
