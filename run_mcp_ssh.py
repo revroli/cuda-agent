@@ -1,14 +1,22 @@
 import asyncio
 import os
+import threading
+import logfire
 import paramiko
 from sshtunnel import SSHTunnelForwarder
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
+import httpx
 
 
 from dotenv import load_dotenv
+
+from coder_agent import init_coder_agent, run_coder_agent
+import nest_asyncio
+from fasta2a.client import A2AClient
+from fasta2a.schema import Message, TextPart
 
 load_dotenv()
 
@@ -98,9 +106,29 @@ async def tunnel_port_over_ssh():
                 mcp_tools_response = await mcp_session.list_tools()
 
                 # Létrehozzuk a Pydantic AI ágenst
-                agent = Agent(
-                    model=OpenAIModel(model),
-                    system_prompt="Te egy segítőkész asszisztens vagy, aki eléri a távoli GPU szervert az eszközein keresztül."
+                coder_agent = Agent(
+                    model,
+                    system_prompt=(
+                        "You are a CUDA coding agent that implements high-performance, production-ready CUDA code. "
+                        "Your job is to receive concise, prioritized recommendations from a CUDA Profiling Advisor, then produce concrete, minimal, and correct code changes to realize those optimizations. "
+                        "You must not use profiling, benchmarking, or measurement tools. Those are reserved for the other agent. "
+                        "You may use any other tool available on the MCP server to inspect files, edit code, reason about the codebase, or validate non-profiling behavior. "
+                        "When given an advisor's recommendation, respond with: 1) a short plan of code edits, 2) patch-style diffs or precise file/line edits the coding agent can apply, and 3) a short rationale and estimated performance impact. "
+                        "Prefer safe, incremental changes that preserve correctness. When multiple options exist, prioritize changes by expected impact and implementation risk."
+                    ),
+                )
+                
+                advisor_agent = Agent(
+                    model,
+                    system_prompt=(
+                        "You are an expert CUDA profiling advisor collaborating with a coding agent. "
+                        "Your primary job is to analyze CUDA source files and profiling output, extract the most important performance information (hotspots, kernel runtimes, memory bandwidth, occupancy, divergent branches, shared memory usage, bank conflicts), "
+                        "and produce concise, prioritized, actionable recommendations the coding agent can implement. "
+                        "You may run shell commands on the remote server using the tool `execute_command(command: str) -> str` to run profilers (nvprof, nsight, nvbench, nvtx, nsys, perf), collect outputs, and reproduce measurements. "
+                        "Only end the conversation when repeated measurements and follow-up checks have shown that performance has reached a clear plateau, meaning further changes are not producing meaningful gains. "
+                        "When you answer, include: 1) a short summary of findings, 2) a prioritized list of concrete code changes (file/line or patch-style suggestion when possible), 3) the profiling commands and minimal steps to reproduce the numbers, and 4) an estimated impact and confidence for each recommendation. "
+                        "Keep answers concise, technical, and targeted for the coding agent to apply changes programmatically."
+                    ),
                 )
 
                 # 2. AZ MCP ESZKÖZÖK REGISZTRÁLÁSA (A Pydantic AI varázslata)
@@ -119,11 +147,20 @@ async def tunnel_port_over_ssh():
                     dynamic_tool_wrapper.__doc__ = tool.description
 
                     # Regisztráljuk az eszközt az ágensbe
-                    agent.tool_plain(dynamic_tool_wrapper)
+                    coder_agent.tool_plain(dynamic_tool_wrapper)
 
                 print(f"[MCP] {len(mcp_tools_response.tools)} eszköz sikeresen csatolva az ágenshez.")
+                nest_asyncio.apply()
+                
+                logfire.configure(send_to_logfire='if-token-present')
+                logfire.instrument_pydantic_ai()
 
-                # 3. Futtatás - felhasználói prompttal (párbeszéd)
+                server = init_coder_agent(coder_agent)
+                
+                daemon_thread = threading.Thread(target=run_coder_agent, args = ("127.0.0.1", 8000, server), daemon=True)
+                daemon_thread.start()
+
+                """# 3. Futtatás - felhasználói prompttal (párbeszéd)
                 chat_history = []
                 max_turns = 10
                 while True:
@@ -146,7 +183,24 @@ async def tunnel_port_over_ssh():
                     ai_text = result.output
                     chat_history.append(("Assistant", ai_text))
 
-                    print(f"\n[AI Vegso Valasz]: {ai_text}")
+                    print(f"\n[AI Vegso Valasz]: {ai_text}")"""
+                    
+                coder_client = A2AClient(
+                    "http://127.0.0.1:8000",
+                    httpx.AsyncClient(timeout=httpx.Timeout(100.0, connect=20.0)),
+                )
+
+                
+                response = await client.send_message(message=Message(
+                    message_id="1",
+                    role="user",
+                    kind="message",
+                    parts=[TextPart(kind="text", text=f"Write a CUDA kernel that adds two vectors together and returns the result and create a .cu file from it.")]
+                ))
+                
+                #final_response = response["result"]
+                print(f"\n[Final Result]: {response}")
+                
 
 
 if __name__ == "__main__":
