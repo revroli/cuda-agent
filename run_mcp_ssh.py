@@ -28,21 +28,6 @@ mcp_server_local_port = os.getenv("MCP_SERVER_LOCAL_PORT")
 model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 remote_key_path = os.getenv("SSH_KEY_PATH")
-facilitator_inbox: list[str] = []
-
-
-def make_facilitator_message_tool(agent_label: str):
-    async def send_message_to_facilitator(message: str):
-        envelope = f"[{agent_label}] {message}"
-        facilitator_inbox.append(envelope)
-        print(f"[Back-channel -> Facilitator] {envelope}")
-        return "Message queued for facilitator."
-
-    send_message_to_facilitator.__name__ = f"send_message_to_facilitator_{agent_label}"
-    send_message_to_facilitator.__doc__ = (
-        f"Send a short message from the {agent_label} agent back to the facilitator."
-    )
-    return send_message_to_facilitator
    
 def init_ssh_client():
     if not remote_host or not remote_user or not ssh_port:
@@ -127,9 +112,6 @@ async def tunnel_port_over_ssh():
                     ),
                 )
 
-                coder_agent.tool_plain(make_facilitator_message_tool("coder"))
-                profiler_agent.tool_plain(make_facilitator_message_tool("profiler"))
-
                 # 2. AZ MCP ESZKÖZÖK REGISZTRÁLÁSA (A Pydantic AI varázslata)
                 for tool in mcp_tools_response.tools:
                     
@@ -176,11 +158,7 @@ async def tunnel_port_over_ssh():
                 registry = AgentRegistry(agent_urls)
                 await registry.create_clients()
                 
-                senior_agent = SeniorProgrammerAgent(
-                    registry=registry,
-                    model=model,
-                    shared_inbox=facilitator_inbox,
-                )
+                senior_agent = SeniorProgrammerAgent(registry=registry, model=model)
 
                     
                 """coder_client = A2AClient(
